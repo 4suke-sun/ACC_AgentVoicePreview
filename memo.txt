@@ -1,0 +1,933 @@
+いいですね。では、**「再生ボタンを押すたびに新しいWebRTCコンタクトを作成する方式」**で、そのまま実装に使える粒度の設計書にします。
+
+---
+
+# Amazon Connect Agentic Voice  
+# 社内音声プレビュー画面 設計書
+
+## 1. 目的
+
+社内利用者がブラウザ上で任意の文章を入力し、Amazon Connectの **Amazon Connect agentic voice** で即時に試聴できる画面を提供する。
+
+従来のように以下を行う必要をなくす。
+
+- コンタクトフローの文言を都度変更する
+- コンタクトフローを都度公開する
+- 電話番号へ実際に架電する
+- 音声確認のためにスマートフォンを使用する
+
+---
+
+## 2. 採用方式
+
+再生ボタンを押すたびに、`StartWebRTCContact` APIで新しいWebRTCコンタクトを作成する。
+
+入力された文章は、`StartWebRTCContact` のコンタクト属性としてAmazon Connectへ渡す。
+
+```text
+Attributes.previewText
+```
+
+Amazon Connectの固定コンタクトフローでは、次の属性をPlay promptブロックから参照する。
+
+```text
+$.Attributes.previewText
+```
+
+### 処理単位
+
+```text
+1回の再生操作 ＝ 1件のAmazon Connectコンタクト
+```
+
+再生終了後は、コンタクトフローの「切断」ブロックにより自動終了する。
+
+---
+
+# 3. システム構成
+
+## 3.1 全体構成
+
+```text
+┌───────────────────────────────┐
+│ 社内ユーザーのブラウザ        │
+│                               │
+│ ・テキスト入力                │
+│ ・再生／停止                  │
+│ ・Chime SDKによる音声再生     │
+└──────────────┬────────────────┘
+               │ HTTPS
+               │ POST /preview-contacts
+               ▼
+┌───────────────────────────────┐
+│ API Gateway                   │
+│                               │
+│ ・認証                        │
+│ ・CORS制御                    │
+│ ・リクエストサイズ制限        │
+└──────────────┬────────────────┘
+               ▼
+┌───────────────────────────────┐
+│ Lambda                        │
+│                               │
+│ ・入力値検証                  │
+│ ・StartWebRTCContact実行      │
+│ ・StopContact実行             │
+│ ・監査ログ出力                │
+└──────────────┬────────────────┘
+               │ AWS SDK
+               ▼
+┌───────────────────────────────┐
+│ Amazon Connect                │
+│                               │
+│ 固定プレビューフロー          │
+│ ・Agentic voice設定           │
+│ ・previewText読み上げ         │
+│ ・切断                        │
+└──────────────┬────────────────┘
+               │ WebRTC
+               ▼
+┌───────────────────────────────┐
+│ Amazon Chime SDK JS           │
+│                               │
+│ ブラウザのスピーカーへ出力    │
+└───────────────────────────────┘
+```
+
+---
+
+# 4. AWSリソース構成
+
+| リソース | 用途 |
+|---|---|
+| Amazon Connect | Agentic voiceによる音声生成 |
+| Amazon Connectコンタクトフロー | 動的な文言の読み上げ |
+| API Gateway | ブラウザ向けバックエンドAPI |
+| Lambda | Connect APIの呼び出し |
+| CloudWatch Logs | アプリケーションログ、エラーログ |
+| Amazon Chime SDK JS | ブラウザでWebRTC音声を受信 |
+| Cognitoまたは既存社内IdP | 社内ユーザー認証 |
+| S3＋CloudFrontなど | フロントエンド配信 |
+| AWS WAF（任意） | APIのレート制限、外部アクセス防止 |
+
+---
+
+# 5. コンタクトフロー設計
+
+## 5.1 フロー名
+
+```text
+AgenticVoicePreviewFlow
+```
+
+## 5.2 フロー概要
+
+```text
+[開始]
+   ↓
+[音声を設定]
+   ↓
+[プロンプトの再生]
+   ↓
+[切断]
+```
+
+## 5.3 音声を設定ブロック
+
+設定内容の例：
+
+| 項目 | 設定値 |
+|---|---|
+| Voice provider | Amazon Connect agentic voice |
+| Language | Japanese／ja-JP |
+| Voice | プレビュー対象の音声 |
+| Speaking style | 必要に応じて設定 |
+
+音声を複数選択できる画面にする場合は、後述の拡張設計を利用する。
+
+---
+
+## 5.4 プロンプトの再生ブロック
+
+### 種別
+
+```text
+Text-to-speech
+```
+
+### テキスト
+
+```text
+$.Attributes.previewText
+```
+
+コンタクト属性をTTSの文章として利用できることは、Amazon Connectの公式ドキュメントに記載されている。
+
+[Create dynamic text strings in Play prompt blocks](https://docs.aws.amazon.com/connect/latest/adminguide/create-dynamic-text-strings.html)
+
+### SSML
+
+初期リリースでは、入力種別をプレーンテキストに固定する。
+
+SSMLやAgentic voice固有タグに対応する場合は、画面上でモードを分ける。
+
+```text
+○ プレーンテキスト
+○ 音声制御タグあり
+```
+
+---
+
+## 5.5 切断ブロック
+
+プロンプトの再生完了後、即座にコンタクトを終了する。
+
+```text
+Play prompt完了
+  ↓
+Disconnect
+```
+
+これにより、不要なConnect利用時間の発生を抑える。
+
+---
+
+## 5.6 エラーブランチ
+
+Play promptブロックでエラーが発生した場合も、必ず切断する。
+
+```text
+Play prompt
+ ├─ 成功 → 切断
+ └─ エラー → 切断
+```
+
+---
+
+# 6. フロントエンド設計
+
+## 6.1 画面案
+
+```text
+┌─────────────────────────────────────────┐
+│ Agentic Voice Preview                   │
+├─────────────────────────────────────────┤
+│                                         │
+│ 音声                                    │
+│ [日本語・音声A                   ▼]     │
+│                                         │
+│ 再生する文章                            │
+│ ┌─────────────────────────────────────┐ │
+│ │お電話ありがとうございます。         │ │
+│ │本日の営業時間は午後6時までです。    │ │
+│ └─────────────────────────────────────┘ │
+│                                         │
+│ 32 / 3000文字                           │
+│                                         │
+│ [▶ 再生]  [■ 停止]                     │
+│                                         │
+│ 状態：再生中                            │
+│                                         │
+└─────────────────────────────────────────┘
+```
+
+---
+
+## 6.2 画面項目
+
+| 項目 | 必須 | 内容 |
+|---|---:|---|
+| 音声選択 | ○ | 使用するAgentic voice |
+| テキスト | ○ | 再生する文章 |
+| 文字数 | － | 現在文字数／上限 |
+| 再生ボタン | － | 新規WebRTCコンタクトを開始 |
+| 停止ボタン | － | WebRTC停止およびContact停止 |
+| ステータス | － | 接続中、再生中、完了、エラー |
+| エラー表示 | － | ユーザー向けエラーメッセージ |
+
+---
+
+## 6.3 画面ステータス
+
+```text
+IDLE
+  ↓ 再生ボタン
+STARTING
+  ↓ API成功
+CONNECTING
+  ↓ WebRTC接続成功
+PLAYING
+  ↓ フロー終了
+COMPLETED
+  ↓
+IDLE
+```
+
+エラー時：
+
+```text
+STARTING / CONNECTING / PLAYING
+  ↓
+ERROR
+  ↓ ユーザー確認
+IDLE
+```
+
+停止時：
+
+```text
+CONNECTING / PLAYING
+  ↓ 停止ボタン
+STOPPING
+  ↓
+IDLE
+```
+
+---
+
+## 6.4 再生処理
+
+1. テキストを検証する
+2. 既存のWebRTCセッションがあれば停止する
+3. 再生ボタンを無効化する
+4. バックエンドAPIを呼び出す
+5. `ConnectionData` を取得する
+6. Chime SDKでWebRTCセッションを生成する
+7. ブラウザの音声出力へ接続する
+8. 音声セッションを開始する
+9. コンタクト終了イベントを監視する
+10. セッションを破棄する
+11. 再生ボタンを有効化する
+
+---
+
+## 6.5 連続クリック対策
+
+`STARTING`、`CONNECTING`、`PLAYING` の間は、再生ボタンを無効化する。
+
+```text
+再生処理中：再生ボタン disabled
+```
+
+文章を変えて再生したい場合は、
+
+1. 現在の再生を停止
+2. テキスト変更
+3. 再度再生
+
+とする。
+
+将来的に「再生ボタンを押したら現在の再生を自動停止して、新しい文章を再生する」動作へ変更してもよい。
+
+---
+
+# 7. バックエンドAPI設計
+
+## 7.1 コンタクト開始API
+
+### エンドポイント
+
+```http
+POST /v1/preview-contacts
+```
+
+### リクエスト
+
+```json
+{
+  "text": "お電話ありがとうございます。本日の営業時間は午後6時までです。",
+  "voiceId": "ja-jp-voice-a"
+}
+```
+
+### 項目
+
+| 項目 | 型 | 必須 | 内容 |
+|---|---|---:|---|
+| text | string | ○ | 再生する文章 |
+| voiceId | string | △ | アプリ側で管理する音声識別子 |
+
+`voiceId` はAmazon Connectへ直接渡すIDではなく、アプリ側の論理IDとする。
+
+---
+
+## 7.2 レスポンス
+
+```json
+{
+  "previewId": "8e9ec480-0c2c-4a08-b9e0-example",
+  "contactId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "connectionData": {
+    "meeting": {},
+    "attendee": {}
+  },
+  "expiresAt": "2026-07-30T10:05:00Z"
+}
+```
+
+実際の `connectionData` には、`StartWebRTCContact` が返すMeeting／Attendee情報を格納する。
+
+フロントエンドはこれをChime SDKへ渡す。
+
+---
+
+## 7.3 Lambda内部のConnect APIリクエスト
+
+概念上、次の内容で `StartWebRTCContact` を実行する。
+
+```json
+{
+  "InstanceId": "CONNECT_INSTANCE_ID",
+  "ContactFlowId": "PREVIEW_CONTACT_FLOW_ID",
+  "ParticipantDetails": {
+    "DisplayName": "Agentic Voice Preview"
+  },
+  "Attributes": {
+    "previewText": "お電話ありがとうございます。本日の営業時間は午後6時までです。",
+    "previewId": "8e9ec480-0c2c-4a08-b9e0-example",
+    "requestedBy": "社内ユーザー識別子"
+  }
+}
+```
+
+公式API：
+
+[StartWebRTCContact](https://docs.aws.amazon.com/connect/latest/APIReference/API_StartWebRTCContact.html)
+
+---
+
+## 7.4 コンタクト停止API
+
+### エンドポイント
+
+```http
+DELETE /v1/preview-contacts/{contactId}
+```
+
+または：
+
+```http
+POST /v1/preview-contacts/{contactId}/stop
+```
+
+### レスポンス
+
+```json
+{
+  "contactId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "status": "STOPPED"
+}
+```
+
+### 内部処理
+
+1. ログインユーザーが開始したContactか確認する
+2. ブラウザ側のChime SDKセッションを停止する
+3. Lambdaから `StopContact` を実行する
+4. 既に終了している場合は成功扱いにする
+
+公式API：
+
+[StopContact](https://docs.aws.amazon.com/connect/latest/APIReference/API_StopContact.html)
+
+---
+
+# 8. 音声選択方式
+
+## 8.1 初期リリースの推奨
+
+まずは音声を1種類に固定する。
+
+```text
+プレビュー画面
+  ↓
+固定ContactFlowId
+  ↓
+固定Agentic voice
+```
+
+最小構成で実装できる。
+
+---
+
+## 8.2 複数音声対応
+
+音声ごとにプレビュー専用フローを用意する。
+
+```text
+voice-a → AgenticVoicePreviewFlowA
+voice-b → AgenticVoicePreviewFlowB
+voice-c → AgenticVoicePreviewFlowC
+```
+
+バックエンドで、画面から送られた論理的な `voiceId` を `ContactFlowId` に変換する。
+
+```text
+voiceId
+  ↓
+許可リスト検索
+  ↓
+ContactFlowId
+```
+
+設定イメージ：
+
+```json
+{
+  "ja-jp-voice-a": {
+    "contactFlowId": "flow-id-a",
+    "displayName": "日本語・女性音声A"
+  },
+  "ja-jp-voice-b": {
+    "contactFlowId": "flow-id-b",
+    "displayName": "日本語・男性音声B"
+  }
+}
+```
+
+### 重要事項
+
+フロントエンドから任意の `ContactFlowId` を受け取らないこと。
+
+不正なフロー実行を防ぐため、
+
+```text
+フロント：論理voiceId
+バックエンド：許可済みContactFlowIdへ変換
+```
+
+とする。
+
+---
+
+# 9. 入力値検証
+
+## 9.1 テキスト検証
+
+| 検証 | 内容 |
+|---|---|
+| 必須チェック | 空文字、空白のみは禁止 |
+| 型チェック | 文字列のみ許可 |
+| 長さチェック | 初期値として最大3,000文字 |
+| バイト数チェック | UTF-8バイト数も確認 |
+| 制御文字 | NULなど不要な制御文字を除外 |
+| 改行 | 許可 |
+| HTML | HTMLとして解釈しない |
+| Markdown | 音声エンジンが記号を読む可能性があるため注意表示 |
+| 音声制御タグ | 初期版は不許可または許可リスト方式 |
+
+Play promptには文字数制限があるため、アプリ側では3,000文字程度に制限するのが安全。
+
+[Play prompt block](https://docs.aws.amazon.com/connect/latest/adminguide/play.html)
+
+---
+
+## 9.2 音声制御タグ
+
+Agentic voiceでは音声制御タグを利用できる場合があるが、初期版では次のどちらかにする。
+
+### 安全優先
+
+```text
+タグをすべてプレーンテキストとして扱う
+```
+
+### 機能優先
+
+許可するタグだけをホワイトリスト化する。
+
+```text
+許可：
+・pause
+・emotion
+・speaking style
+
+拒否：
+・不正な入れ子
+・閉じタグなし
+・未知のタグ
+```
+
+不正タグがそのまま読み上げられる可能性があるため、事前検証を行う。
+
+[Agentic voice best practices](https://docs.aws.amazon.com/connect/latest/adminguide/agentic-voice-best-practices.html)
+
+---
+
+# 10. 認証・認可
+
+## 10.1 認証
+
+社内向けのため、以下のいずれかを利用する。
+
+- Amazon Cognito
+- Microsoft Entra ID
+- Google Workspace
+- AWS IAM Identity Center
+- 既存社内SSO
+
+API GatewayでJWTを検証する。
+
+---
+
+## 10.2 AWS認証情報
+
+ブラウザには以下を置かない。
+
+- AWS Access Key ID
+- AWS Secret Access Key
+- Lambda実行ロールの認証情報
+- Amazon Connect管理者権限
+
+`StartWebRTCContact` はLambdaから実行する。
+
+ブラウザには、WebRTC参加に必要な一時的な `ConnectionData` のみ返す。
+
+---
+
+## 10.3 Lambda IAM権限
+
+最低限、以下を付与する。
+
+```text
+connect:StartWebRTCContact
+connect:StopContact
+```
+
+必要に応じて：
+
+```text
+connect:DescribeContact
+connect:UpdateContactAttributes
+```
+
+初期版では `UpdateContactFlowContent` は不要。
+
+可能な範囲で、対象のAmazon Connectインスタンスとプレビュー用フローへリソースを限定する。
+
+---
+
+# 11. ログ設計
+
+## 11.1 出力する情報
+
+```json
+{
+  "event": "START_PREVIEW_CONTACT",
+  "previewId": "8e9ec480-0c2c-4a08-b9e0-example",
+  "contactId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "userId": "user@example.com",
+  "voiceId": "ja-jp-voice-a",
+  "textLength": 32,
+  "status": "SUCCESS"
+}
+```
+
+---
+
+## 11.2 出力しない情報
+
+原則、入力された文章そのものはログへ出力しない。
+
+```text
+NG：
+"text": "顧客の名前や個人情報が含まれる文章"
+
+OK：
+"textLength": 125
+"textHash": "必要な場合のみ"
+```
+
+試聴文章に個人情報や機密情報が含まれる可能性があるため、CloudWatch Logsには文字数とハッシュ程度だけを記録する。
+
+---
+
+## 11.3 推奨ログイベント
+
+| イベント | 内容 |
+|---|---|
+| START_PREVIEW_REQUESTED | 再生要求受付 |
+| START_PREVIEW_SUCCEEDED | Contact作成成功 |
+| START_PREVIEW_FAILED | Contact作成失敗 |
+| STOP_PREVIEW_REQUESTED | 停止要求受付 |
+| STOP_PREVIEW_SUCCEEDED | 停止成功 |
+| STOP_PREVIEW_FAILED | 停止失敗 |
+| VALIDATION_FAILED | 入力値エラー |
+| RATE_LIMITED | レート制限 |
+
+---
+
+# 12. エラー設計
+
+## 12.1 APIエラーレスポンス
+
+```json
+{
+  "error": {
+    "code": "PREVIEW_START_FAILED",
+    "message": "音声プレビューを開始できませんでした。",
+    "requestId": "request-id"
+  }
+}
+```
+
+---
+
+## 12.2 エラーコード
+
+| HTTP | コード | 内容 |
+|---:|---|---|
+| 400 | INVALID_TEXT | 文言が未入力または不正 |
+| 400 | TEXT_TOO_LONG | 最大文字数超過 |
+| 400 | INVALID_VOICE | 許可されていない音声 |
+| 401 | UNAUTHORIZED | 未認証 |
+| 403 | FORBIDDEN | 利用権限なし |
+| 409 | PREVIEW_ALREADY_ACTIVE | 再生中 |
+| 429 | RATE_LIMITED | 利用回数超過 |
+| 500 | PREVIEW_START_FAILED | Contact開始失敗 |
+| 502 | CONNECT_API_FAILED | Amazon Connect APIエラー |
+| 503 | PREVIEW_UNAVAILABLE | 一時的に利用不可 |
+
+---
+
+## 12.3 ユーザー向け表示
+
+AWSの詳細な内部エラーは、そのまま画面へ表示しない。
+
+```text
+画面：
+音声プレビューを開始できませんでした。
+しばらく待ってから、もう一度お試しください。
+
+ログ：
+ThrottlingException
+ServiceQuotaExceededException
+InternalServiceException
+```
+
+---
+
+# 13. タイムアウト設計
+
+| 処理 | タイムアウト例 |
+|---|---:|
+| プレビュー開始API | 10秒 |
+| WebRTC接続 | 15秒 |
+| 音声再生 | 入力文章に応じて最大数分 |
+| 停止API | 10秒 |
+| 未接続Contact | 30秒程度で異常扱い |
+
+WebRTC接続に失敗した場合は、バックエンドの停止APIを呼び出してContactを終了する。
+
+---
+
+# 14. リトライ設計
+
+## StartWebRTCContact
+
+自動リトライは慎重に行う。
+
+同じ再生操作で複数Contactが作成されるのを防ぐため、`ClientToken` が利用できる場合は、`previewId` を冪等性キーとして指定する。
+
+```text
+ClientToken = previewId
+```
+
+フロントエンド側では、タイムアウト時に無条件で何度も再送しない。
+
+---
+
+# 15. ブラウザ終了時の処理
+
+以下のイベントで、Chime SDKの音声セッションを停止する。
+
+```text
+・画面遷移
+・ブラウザタブ終了
+・再読み込み
+・ユーザーのログアウト
+```
+
+ただし、ブラウザ終了イベントから停止APIを確実に呼べるとは限らない。
+
+最終的にはAmazon Connect側のコンタクトフローが、自動的に切断される構成にしておく。
+
+---
+
+# 16. 同時利用・レート制限
+
+## 推奨制限
+
+初期値の例：
+
+```text
+1ユーザーあたり：
+・同時再生：1件
+・1分あたり：10回
+・1時間あたり：100回
+```
+
+API Gateway、WAF、Lambda、またはDynamoDBで制御する。
+
+複数人が同時に使用しても、各文章はコンタクト属性に分離されるため、フロー更新方式のような文言競合は発生しない。
+
+---
+
+# 17. セキュリティ要件
+
+- 社内SSO必須
+- HTTPS必須
+- AWS認証情報をブラウザへ置かない
+- 任意のContactFlowIdを受け付けない
+- 入力テキストをCloudWatch Logsへ記録しない
+- APIへレート制限を設定
+- CORSの許可オリジンを社内画面のドメインに限定
+- CSPを設定
+- `ConnectionData` を永続保存しない
+- WebRTC参加情報をURLクエリへ埋め込まない
+- 本番フローとプレビューフローを分離
+- 可能であれば専用Connectインスタンスまたは専用フローで運用
+
+---
+
+# 18. コスト上の注意
+
+この方式はPSTNへの架電ではないが、再生ごとにAmazon ConnectのVoiceコンタクトが作成される。
+
+したがって、以下の利用料金が発生する可能性がある。
+
+- Amazon Connectの音声利用時間
+- Agentic voiceの利用料金
+- API Gateway
+- Lambda
+- CloudWatch Logs
+- 必要に応じたChime／WebRTC関連料金
+
+録音が不要なら、プレビューフローでは録音を有効にしない。
+
+再生終了後は即切断し、コンタクト時間を最小化する。
+
+---
+
+# 19. テスト項目
+
+## 19.1 正常系
+
+- ひらがなを再生できる
+- カタカナを再生できる
+- 漢字を再生できる
+- 英数字を含む文章を再生できる
+- 句読点を含む文章を再生できる
+- 改行を含む文章を再生できる
+- 最大文字数の文章を再生できる
+- 再生終了後にContactが終了する
+- 文章を変更して再度再生できる
+- 複数ユーザーが異なる文章を同時再生できる
+
+## 19.2 異常系
+
+- 空文字
+- 空白のみ
+- 最大文字数超過
+- 不正な音声ID
+- WebRTC接続失敗
+- Connect APIタイムアウト
+- Connect APIスロットリング
+- 再生中の再生ボタン連打
+- 再生中にブラウザを閉じる
+- 再生中にネットワークが切断される
+- 停止対象Contactがすでに終了している
+- 不正な認証トークン
+- 許可されていないOriginからのアクセス
+
+## 19.3 音声品質
+
+- 句読点による間の確認
+- 数字の読み方
+- 日付の読み方
+- 電話番号の読み方
+- URLの読み方
+- 英単語の発音
+- 括弧、記号の読み方
+- 改行による間の変化
+- 長文でのイントネーション
+- 音声制御タグ利用時の挙動
+
+---
+
+# 20. 実装順序
+
+## Phase 1：疎通確認
+
+1. Agentic voice対応のConnectインスタンスを確認
+2. 固定文言のプレビューフローを作成
+3. `StartWebRTCContact` を手動実行
+4. AWS公式のChime SDKサンプルで音声受信
+5. Agentic voiceがWebRTC経由で再生できることを確認
+
+## Phase 2：動的文言
+
+1. Play promptを `$.Attributes.previewText` に変更
+2. `StartWebRTCContact.Attributes.previewText` を設定
+3. 任意文章が読み上げられることを確認
+4. 日本語・数字・改行を検証
+
+## Phase 3：社内画面
+
+1. テキストボックス作成
+2. 再生・停止ボタン作成
+3. API Gateway＋Lambda作成
+4. Chime SDK組み込み
+5. エラー表示と状態管理実装
+
+## Phase 4：セキュリティ・運用
+
+1. 社内SSO連携
+2. IAM最小権限化
+3. CORS制限
+4. レート制限
+5. ログの機密情報確認
+6. コスト監視
+7. CloudWatch Alarm設定
+
+---
+
+# 21. 完了条件
+
+以下をすべて満たした場合に完了とする。
+
+- コンタクトフローを変更せず、任意文章を再生できる
+- 電話番号への架電が発生しない
+- 同一ブラウザで文章変更と再生を繰り返せる
+- 再生ごとに新しいContactが作成される
+- 再生終了後にContactが自動終了する
+- 複数ユーザーの入力文章が競合しない
+- AWS認証情報がブラウザへ露出しない
+- 入力文章がCloudWatch Logsへ残らない
+- エラー時に不要なContactが残留しない
+
+---
+
+## 最終的な実装方針
+
+```text
+コンタクトフロー：
+固定
+
+再生文章：
+StartWebRTCContact.Attributes.previewTextで毎回渡す
+
+読み上げ：
+$.Attributes.previewText
+
+ブラウザ再生：
+Amazon Chime SDK JS
+
+再生単位：
+再生ボタン1回につき新規Contactを1件作成
+
+終了：
+プロンプト再生完了後にフローで自動切断
+```
+
+この構成なら、フローの更新・保存・公開は初回だけで済み、以降は画面上で文言を入れ替えながら試聴できます。
