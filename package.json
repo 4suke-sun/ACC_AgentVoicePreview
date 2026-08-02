@@ -1,0 +1,28 @@
+{
+  "name": "acc-agentic-voice-preview",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Amazon Connect Agentic Voice 社内音声プレビュー画面",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "npm run build --workspaces --if-present",
+    "synth": "npm run synth -w @avp/infra",
+    "verify": "npm run lint && npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.1.2",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

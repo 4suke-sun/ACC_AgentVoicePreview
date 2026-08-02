@@ -1,0 +1,7 @@
+node_modules/
+dist/
+cdk.out/
+coverage/
+*.log
+.DS_Store
+packages/frontend/public/config.json
