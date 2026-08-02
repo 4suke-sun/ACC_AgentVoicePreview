@@ -3,7 +3,7 @@
 Amazon Connect **Agentic Voice** の社内向け音声プレビュー画面。
 任意の文章をブラウザで入力し、電話番号への架電・コンタクトフローの都度更新なしに、その場で試聴できる。
 
-![Uploading image.png…]()
+<img width="722" height="462" alt="image" src="https://github.com/user-attachments/assets/d5e8ac95-b696-425a-ab92-4a0facd74f4d" />
 
 設計書: [`memo.txt`](./memo.txt) / 開発規約: [`CLAUDE.md`](./CLAUDE.md)
 
