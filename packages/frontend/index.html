@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agentic Voice Preview</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Agentic Voice Preview</h1>
+
+      <section class="field">
+        <label for="voice-select">音声</label>
+        <select id="voice-select" disabled>
+          <option>読み込み中...</option>
+        </select>
+      </section>
+
+      <section class="field">
+        <label for="preview-text">再生する文章</label>
+        <textarea
+          id="preview-text"
+          rows="6"
+          placeholder="お電話ありがとうございます。本日の営業時間は午後6時までです。"
+        ></textarea>
+        <p class="char-count"><span id="char-count">0</span> / <span id="char-max"></span>文字</p>
+      </section>
+
+      <section class="controls">
+        <button id="play-button" type="button">▶ 再生</button>
+        <button id="stop-button" type="button" disabled>■ 停止</button>
+      </section>
+
+      <p class="status">状態:<span id="status-label">待機中</span></p>
+      <p id="error-message" class="error" hidden></p>
+
+      <audio id="preview-audio"></audio>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
