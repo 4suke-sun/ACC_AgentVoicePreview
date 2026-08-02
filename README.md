@@ -1,6 +1,6 @@
 # ACC_AgentVoicePreview
 
-Amazon Connect **Agentic Voice** の社内向け音声プレビュー画面。
+Amazon Connect **Agentic Voice** の音声プレビュー画面。
 任意の文章をブラウザで入力し、電話番号への架電・コンタクトフローの都度更新なしに、その場で試聴できる。
 
 <img width="722" height="462" alt="image" src="https://github.com/user-attachments/assets/d5e8ac95-b696-425a-ab92-4a0facd74f4d" />
